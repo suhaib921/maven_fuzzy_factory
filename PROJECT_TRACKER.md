@@ -1177,9 +1177,5 @@
 ---
 
 **Last Updated:** 2026-01-20
-<<<<<<< HEAD
 **Updated By:** suhaib
-=======
-**Updated By:** Claude
->>>>>>> e44bee2ded4c1b406c4b48f9b09902f56776d3a6
 **Total Session Time:** 0 hours

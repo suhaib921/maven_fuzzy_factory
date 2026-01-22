@@ -214,7 +214,7 @@ cp ../PROJECT_STRUCTURE.md .
 cp ../Project_overview.txt .
 
 # Mark first task as in_progress
-# (Claude will help you update this as you go)
+# (suhaib will help you update this as you go)
 
 # Make initial commit
 git add .
@@ -350,7 +350,7 @@ If you encounter issues:
 1. Check the troubleshooting section above
 2. Review error messages carefully
 3. Consult PROJECT_TRACKER.md for context
-4. Ask Claude for help with specific error messages!
+4. Ask suhaib for help with specific error messages!
 
 ---
 
