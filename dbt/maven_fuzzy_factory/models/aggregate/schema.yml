@@ -1,0 +1,110 @@
+version: 2
+
+models:
+  - name: agg_daily_traffic
+    description: "Daily aggregated traffic, conversion, and revenue metrics for dashboard performance"
+    columns:
+      - name: date
+        description: "Calendar date"
+        data_tests:
+          - unique
+          - not_null
+      - name: total_sessions
+        description: "Total sessions for the day"
+        data_tests:
+          - not_null
+      - name: total_orders
+        description: "Total orders for the day"
+        data_tests:
+          - not_null
+      - name: conversion_rate
+        description: "Session to order conversion rate (%)"
+        data_tests:
+          - not_null
+      - name: gross_revenue
+        description: "Total gross revenue for the day"
+        data_tests:
+          - not_null
+      - name: net_revenue
+        description: "Total net revenue (after refunds)"
+        data_tests:
+          - not_null
+
+  - name: agg_channel_performance
+    description: "Channel and device level aggregated performance metrics for marketing analysis"
+    columns:
+      - name: channel_key
+        description: "Channel surrogate key"
+        data_tests:
+          - not_null
+      - name: channel_name
+        description: "Marketing channel name"
+        data_tests:
+          - not_null
+      - name: device_type
+        description: "Device type (desktop/mobile)"
+        data_tests:
+          - not_null
+      - name: total_sessions
+        description: "Total sessions for channel/device"
+        data_tests:
+          - not_null
+      - name: conversion_rate
+        description: "Conversion rate for channel/device (%)"
+        data_tests:
+          - not_null
+      - name: revenue_per_session
+        description: "Average revenue per session"
+        data_tests:
+          - not_null
+
+  - name: agg_product_performance
+    description: "Product level aggregated sales, revenue, and refund metrics"
+    columns:
+      - name: product_key
+        description: "Product surrogate key"
+        data_tests:
+          - unique
+          - not_null
+      - name: product_name
+        description: "Product name"
+        data_tests:
+          - not_null
+      - name: total_items_sold
+        description: "Total items sold"
+        data_tests:
+          - not_null
+      - name: gross_revenue
+        description: "Total gross revenue for product"
+        data_tests:
+          - not_null
+      - name: net_revenue
+        description: "Net revenue after refunds"
+        data_tests:
+          - not_null
+      - name: refund_rate
+        description: "Refund rate for product (%)"
+        data_tests:
+          - not_null
+
+  - name: agg_funnel_metrics
+    description: "Conversion funnel metrics showing drop-off at each step"
+    columns:
+      - name: segment_type
+        description: "Type of segment (Overall/Channel)"
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['Overall', 'Channel']
+      - name: segment_name
+        description: "Name of the segment"
+        data_tests:
+          - not_null
+      - name: total_sessions
+        description: "Total sessions in segment"
+        data_tests:
+          - not_null
+      - name: overall_conversion_rate
+        description: "Overall conversion rate (%)"
+        data_tests:
+          - not_null

@@ -1,0 +1,6 @@
+# Metabase binaries
+*.jar
+maven_fuzzy_factory/dbt/maven_fuzzy_factory/metabase/
+
+# OS
+.DS_Store

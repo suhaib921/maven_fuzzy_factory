@@ -1,0 +1,677 @@
+## 1. Project overview
+
+**Objective:** Build an end‑to‑end data engineering pipeline that ingests, models, and serves analytics data for the Toy Store E‑Commerce business (Maven Fuzzy Factory, a teddy bear retailer) to support marketing and product performance analysis. [mavenanalytics](https://mavenanalytics.io/data-playground/toy-store-e-commerce-database)
+
+**Primary business questions:**
+- What is the trend in website sessions and order volume over time? [ismoexcel.home](https://ismoexcel.home.blog/2026/01/05/maven-toy-store-e-commerce-database/)
+- How is the session‑to‑order conversion rate trending? [github](https://github.com/khaled-mehizel/maven-fuzzy-factory)
+- Which marketing channels and campaigns are most successful? [ismoexcel.home](https://ismoexcel.home.blog/2026/01/05/maven-toy-store-e-commerce-database/)
+- How have revenue per order and revenue per session evolved? [visionlabs](https://visionlabs.com/metrics/rps/)
+
+**Deliverable:** A production‑style data platform (SQL database or cloud data warehouse + transformation layer + semantic layer or views) with dashboards/notebooks answering the questions above. [status.mavenanalytics](https://status.mavenanalytics.io/data-playground/toy-store-e-commerce-database)
+
+***
+
+## 2. Data sources and scope
+
+**Source dataset:** Toy Store E‑Commerce / Maven Fuzzy Factory multi‑table dataset (CSV files) containing website sessions, pageviews, orders, order items, products, and returns. [status.mavenanalytics](https://status.mavenanalytics.io/data-playground/toy-store-e-commerce-database)
+
+**Dataset characteristics:**
+- **Time period:** March 19, 2012 to March 19, 2015 (3 years of historical data)
+- **Data volume:**
+  - ~472,871 website sessions
+  - ~1,188,124 pageviews
+  - ~32,313 orders
+  - ~40,025 order line items
+  - ~1,731 refunds
+  - 4 products
+- **Traffic sources:** gsearch (Google Search), bsearch (Bing Search), socialbook (social media), direct/organic (NULL utm_source)
+- **Campaigns:** brand, nonbrand, desktop_targeted, pilot
+- **Devices:** desktop, mobile (no tablet traffic in this dataset)
+- **Products:**
+  1. The Original Mr. Fuzzy (launched 2012-03-19)
+  2. The Forever Love Bear (launched 2013-01-06)
+  3. The Birthday Sugar Panda
+  4. The Hudson River Mini bear
+
+**Actual raw table schemas (as found in CSV files):**
+
+- **orders**
+  - order_id (PK)
+  - created_at
+  - website_session_id (FK)
+  - user_id (FK)
+  - primary_product_id (FK)
+  - items_purchased
+  - price_usd
+  - cogs_usd
+
+- **order_items**
+  - order_item_id (PK)
+  - created_at
+  - order_id (FK)
+  - product_id (FK)
+  - is_primary_item (binary: 1 = primary item in order)
+  - price_usd
+  - cogs_usd
+  - **Note:** No quantity field; each row = 1 item
+
+- **order_item_refunds**
+  - order_item_refund_id (PK)
+  - created_at
+  - order_item_id (FK)
+  - order_id (FK)
+  - refund_amount_usd
+
+- **products**
+  - product_id (PK)
+  - created_at (product launch date)
+  - product_name
+  - **Note:** No category or status fields; will need to derive product categories from product names
+
+- **website_sessions**
+  - website_session_id (PK)
+  - created_at
+  - user_id (FK)
+  - is_repeat_session (binary: 1 = repeat visitor)
+  - utm_source (e.g., gsearch, bsearch, socialbook)
+  - utm_campaign (e.g., brand, nonbrand, desktop_targeted, pilot)
+  - utm_content (ad/content variant)
+  - device_type (desktop, mobile)
+  - http_referer (source URL)
+  - **Note:** No landing_page field; will need to derive from website_pageviews
+
+- **website_pageviews**
+  - website_pageview_id (PK)
+  - created_at
+  - website_session_id (FK)
+  - pageview_url (e.g., /home, /products, /cart, /billing, /thank-you-for-your-order)
+  - **Note:** No page_type field; will need to derive from pageview_url
+  - **Page types found:** home pages, landing pages (/lander-1 to /lander-5), product pages, /cart, /billing, /billing-2, /shipping, /thank-you-for-your-order
+
+**Key data insights and patterns:**
+- **Conversion funnel:** /home or /lander-* → /products → product detail pages → /cart → /billing or /billing-2 → /shipping → /thank-you-for-your-order
+- **Landing page variations:** Multiple landing page tests (/lander-1 through /lander-5) suggest A/B testing activity
+- **Billing page variation:** Two billing pages (/billing, /billing-2) indicate checkout optimization experiments
+- **Multi-item orders:** orders.items_purchased can be > 1; order_items has multiple rows per order
+- **Primary product concept:** orders.primary_product_id + order_items.is_primary_item flag indicates bundle/cross-sell structure
+- **Refund rate:** ~5.4% refund rate (1,731 refunds / 32,313 orders)
+- **Session-to-order conversion:** ~6.8% overall (32,313 orders / 472,871 sessions)
+- **NULL utm values:** Sessions with NULL utm_source/utm_campaign likely represent direct traffic or organic visits
+
+**Target modeled entities in the warehouse:**
+
+The following schema represents the target analytical model after transformations:
+
+- **dim_date**
+  - date_key (PK, YYYYMMDD format)
+  - calendar_date
+  - year, quarter, month, month_name
+  - week, week_of_year
+  - day_of_month, day_of_week, day_name
+  - is_weekend, is_month_start, is_month_end
+
+- **dim_channel**
+  - channel_key (PK, surrogate key)
+  - utm_source (gsearch, bsearch, socialbook, direct)
+  - utm_campaign (brand, nonbrand, desktop_targeted, pilot, organic)
+  - utm_content
+  - channel_name (derived: "Google Search - Brand", "Bing Search - Nonbrand", etc.)
+  - is_paid_traffic (1 if utm_source is not NULL)
+  - is_brand_campaign (1 if utm_campaign = 'brand')
+
+- **dim_device**
+  - device_key (PK, surrogate key)
+  - device_type (desktop, mobile)
+
+- **dim_product**
+  - product_id (PK from source)
+  - product_name
+  - product_category (derived: "Bears", "Pandas", etc.)
+  - launch_date (from products.created_at)
+  - is_active (1 if currently selling)
+  - product_line (derived: "Mr. Fuzzy", "Love Bear", "Sugar Panda", "Mini Bear")
+
+- **dim_page**
+  - page_key (PK, surrogate key)
+  - pageview_url
+  - page_type (home, lander, product_detail, products_list, cart, billing, shipping, thank_you)
+  - page_category (landing, product, checkout, confirmation)
+  - is_landing_page (1 if /home or /lander-*)
+  - is_product_page (1 if product detail page)
+
+- **fact_sessions**
+  - session_id (PK from source)
+  - user_id (FK)
+  - session_date_key (FK to dim_date)
+  - channel_key (FK to dim_channel)
+  - device_key (FK to dim_device)
+  - session_timestamp
+  - is_repeat_session
+  - landing_page_key (FK to dim_page, derived from first pageview)
+  - exit_page_key (FK to dim_page, derived from last pageview)
+  - pageviews_count (count of pageviews in session)
+  - session_duration_sec (derived from first to last pageview timestamp)
+  - is_bounced (1 if only 1 pageview)
+  - reached_products (1 if viewed /products or product detail)
+  - reached_cart (1 if viewed /cart)
+  - reached_billing (1 if viewed /billing*)
+  - has_order (1 if session resulted in order)
+
+- **fact_pageviews**
+  - pageview_id (PK from source)
+  - session_id (FK to fact_sessions)
+  - page_key (FK to dim_page)
+  - pageview_date_key (FK to dim_date)
+  - pageview_timestamp
+  - pageview_sequence (ordinal position within session)
+
+- **fact_orders**
+  - order_id (PK from source)
+  - session_id (FK to fact_sessions)
+  - user_id (FK)
+  - order_date_key (FK to dim_date)
+  - primary_product_id (FK to dim_product)
+  - order_timestamp
+  - items_purchased (total item count)
+  - gross_revenue_usd (from orders.price_usd)
+  - cogs_usd
+  - gross_margin_usd (gross_revenue_usd - cogs_usd)
+  - total_refund_amount_usd (aggregated from order_item_refunds)
+  - net_revenue_usd (gross_revenue_usd - total_refund_amount_usd)
+  - is_fully_refunded (1 if total_refund_amount_usd >= gross_revenue_usd)
+  - has_refund (1 if any refund exists)
+
+- **fact_order_items**
+  - order_item_id (PK from source)
+  - order_id (FK to fact_orders)
+  - product_id (FK to dim_product)
+  - order_date_key (FK to dim_date)
+  - is_primary_item
+  - item_price_usd
+  - item_cogs_usd
+  - item_margin_usd (item_price_usd - item_cogs_usd)
+  - refund_amount_usd (from order_item_refunds if refunded)
+  - is_refunded (1 if refund exists)
+
+- **fact_refunds**
+  - order_item_refund_id (PK from source)
+  - order_item_id (FK to fact_order_items)
+  - order_id (FK to fact_orders)
+  - refund_date_key (FK to dim_date)
+  - refund_timestamp
+  - refund_amount_usd
+  - days_to_refund (days between order and refund)
+
+**Out of scope (v1):**
+- Real‑time/streaming ingestion.  
+- PII handling beyond basic best practices (dataset contains no real PII).  
+- Machine learning models; v1 focuses on descriptive analytics and reporting. [mavenanalytics](https://mavenanalytics.io/data-playground/toy-store-e-commerce-database)
+
+***
+
+## 3. Functional requirements
+
+### 3.1 Ingestion layer
+
+The system must: [sarasanalytics](https://www.sarasanalytics.com/blog/ecommerce-data-management)
+
+- Ingest all source tables from CSV/SQL dump into a raw storage zone (for example, `raw_website_sessions`, `raw_orders`, etc.).  
+- Support re‑ingestion/rebuild from scratch (idempotent runs).  
+- Track load metadata per table:
+  - load_date, source_file_name, row_count_ingested.
+
+### 3.2 Data modeling & transformation
+
+Design a warehouse‑style model with at least:
+
+**Core dimensions:**
+
+- `dim_date`  
+  - One row per day; attributes: date_key, calendar_date, year, month, week, weekday, etc.  
+- `dim_channel`  
+  - channel_id, channel_name (for example, gsearch, bsearch, socialbook, email), campaign_type (brand/nonbrand), medium, paid_flag. [ismoexcel.home](https://ismoexcel.home.blog/2026/01/05/maven-toy-store-e-commerce-database/)
+- `dim_device`  
+  - device_id, device_type (desktop, mobile, tablet).  
+- `dim_product`  
+  - product_id, product_name, category, launch_date, is_active, price_band (optional). [ismoexcel.home](https://ismoexcel.home.blog/2026/01/05/maven-toy-store-e-commerce-database/)
+
+**Core fact tables:**
+
+- `fact_sessions`  
+  - Grain: one row per website session.  
+  - Keys: session_id, date_key, channel_id, device_id.  
+  - Metrics: session_count (1), bounced_flag (optional), first_page, last_page, session_duration_sec (if derivable). [github](https://github.com/khaled-mehizel/maven-fuzzy-factory/blob/main/fuzzy-mid-course-prjt.sql)
+- `fact_pageviews`  
+  - Grain: one row per pageview.  
+  - Keys: pageview_id, session_id, date_key, page_type.  
+  - Metrics: pageview_count (1).  
+- `fact_orders`  
+  - Grain: one row per order.  
+  - Keys: order_id, session_id, date_key, primary_product_id.  
+  - Metrics: gross_revenue, net_revenue (after refunds), item_count, is_refunded_flag. [vibetrace](https://vibetrace.com/revenue-per-session/)
+- `fact_order_items`  
+  - Grain: one row per order line.  
+  - Metrics: line_revenue, quantity, refund_amount (if joined from refunds).  
+- `fact_returns`  
+  - Grain: one row per refunded order or order line (depending on data granularity).  
+  - Metrics: refund_amount, refund_count (1).
+
+**Required transformations and derivations:**
+
+1. **Date dimension population:**
+   - Generate dim_date for full range: 2012-03-19 to 2015-03-19 (and optionally future dates)
+   - Calculate all calendar attributes (year, quarter, month, week, day of week, etc.)
+
+2. **Channel dimension normalization:**
+   - Map NULL utm_source → "direct" or "organic"
+   - Map NULL utm_campaign → "organic" or "none"
+   - Create channel_name combining source and campaign (e.g., "Google Search - Brand")
+   - Derive is_paid_traffic (0 when utm_source is NULL)
+   - Derive is_brand_campaign (1 when utm_campaign = 'brand')
+
+3. **Page type derivation from pageview_url:**
+   - '/home' → page_type = 'home'
+   - '/lander-1' through '/lander-5' → page_type = 'lander'
+   - '/products' → page_type = 'products_list'
+   - '/the-original-mr-fuzzy', '/the-forever-love-bear', etc. → page_type = 'product_detail'
+   - '/cart' → page_type = 'cart'
+   - '/billing' or '/billing-2' → page_type = 'billing'
+   - '/shipping' → page_type = 'shipping'
+   - '/thank-you-for-your-order' → page_type = 'thank_you'
+
+4. **Product categorization (derived from product_name):**
+   - "The Original Mr. Fuzzy" → category = "Bears", line = "Mr. Fuzzy"
+   - "The Forever Love Bear" → category = "Bears", line = "Love Bear"
+   - "The Birthday Sugar Panda" → category = "Pandas", line = "Sugar Panda"
+   - "The Hudson River Mini bear" → category = "Bears", line = "Mini Bear"
+
+5. **Session-level aggregations (for fact_sessions):**
+   - landing_page: MIN(pageview_timestamp) within session → get pageview_url
+   - exit_page: MAX(pageview_timestamp) within session → get pageview_url
+   - pageviews_count: COUNT(pageviews) per session
+   - session_duration_sec: MAX(pageview_timestamp) - MIN(pageview_timestamp) in seconds
+   - is_bounced: 1 if pageviews_count = 1, else 0
+   - reached_products: 1 if any pageview in session has page_type IN ('products_list', 'product_detail')
+   - reached_cart: 1 if any pageview has page_type = 'cart'
+   - reached_billing: 1 if any pageview has page_type = 'billing'
+   - has_order: 1 if session_id exists in orders table
+
+6. **Order-level aggregations (for fact_orders):**
+   - total_refund_amount_usd: SUM(refund_amount_usd) from order_item_refunds grouped by order_id
+   - net_revenue_usd: price_usd - COALESCE(total_refund_amount_usd, 0)
+   - gross_margin_usd: price_usd - cogs_usd
+   - is_fully_refunded: 1 if total_refund_amount_usd >= price_usd
+   - has_refund: 1 if total_refund_amount_usd > 0
+
+7. **Order item-level (for fact_order_items):**
+   - item_margin_usd: price_usd - cogs_usd
+   - refund_amount_usd: JOIN to order_item_refunds on order_item_id
+   - is_refunded: 1 if refund exists
+
+8. **Refund metrics (for fact_refunds):**
+   - days_to_refund: DATEDIFF(refund.created_at, order.created_at)
+
+9. **Timestamp standardization:**
+   - All timestamps appear to be in consistent format (YYYY-MM-DD HH:MM:SS)
+   - Ensure timezone is documented and consistent across all tables
+
+### 3.3 Business metrics & aggregations
+
+Create curated views or aggregate tables for core analytics: [syte](https://www.syte.ai/glossary/average-revenue-per-session/)
+
+1. **Traffic and orders over time**
+   - Daily/weekly/monthly aggregates:
+     - sessions, orders, unique_sessions, unique_orders.  
+   - Plot‑ready tables with date and counts.
+
+2. **Session‑to‑order conversion**
+   - By day/week/month:
+     - conversion_rate = orders / sessions.  
+   - By channel and device:
+     - conversion_rate = orders / sessions per channel/device.
+
+3. **Channel and campaign performance**
+   - For each channel/campaign:
+     - sessions, orders, conversion_rate, gross_revenue, net_revenue, revenue_per_session, revenue_per_order. [improvado](https://improvado.io/blog/ecommerce-analytics)
+   - Optional: split brand vs non‑brand campaigns. [github](https://github.com/khaled-mehizel/maven-fuzzy-factory)
+
+4. **Revenue per order & per session**
+   - Over time:
+     - revenue_per_order = gross_revenue / orders.  
+     - revenue_per_session = gross_revenue / sessions. [visionlabs](https://visionlabs.com/metrics/rps/)
+   - Also by channel and by device.
+
+5. **Product and launch impact**
+   - Revenue and orders by product and product category.
+   - Pre/post‑launch comparisons for key products using launch_date windows:
+     - The Forever Love Bear (launched 2013-01-06): compare 6 months before/after
+     - Analyze impact on overall revenue, AOV, and conversion rates
+   - Cross-sell analysis: primary vs. non-primary items in orders
+   - Product mix trends over time
+
+6. **Landing page and A/B test performance**
+   - Compare conversion rates across landing pages:
+     - /home (original homepage)
+     - /lander-1, /lander-2, /lander-3, /lander-4, /lander-5 (test variants)
+   - Bounce rates by landing page
+   - Session duration and pageview depth by landing page
+   - Revenue per session by landing page
+
+7. **Billing page optimization analysis**
+   - Compare /billing vs. /billing-2 performance:
+     - Drop-off rates (sessions reaching billing but not thank-you page)
+     - Completion rates
+     - Time spent on each billing page
+   - Identify which version performs better
+
+8. **User behavior and cohort analysis**
+   - New vs. repeat visitor performance (using is_repeat_session):
+     - Conversion rates
+     - AOV differences
+     - Channel preferences
+   - User lifetime value: track users across multiple sessions and orders
+   - Time to second purchase analysis
+
+9. **Funnel analysis**
+   - Conversion rates at each step:
+     - Landing → Products viewed
+     - Products → Cart
+     - Cart → Billing
+     - Billing → Shipping
+     - Shipping → Order completion
+   - Drop-off analysis by channel, device, and landing page
+   - Identify biggest conversion bottlenecks
+
+10. **Refund and return analysis**
+    - Refund rate by product
+    - Refund rate by channel and campaign
+    - Time-to-refund distribution
+    - Refund patterns: identify high-refund periods or cohorts
+
+***
+
+## 4. Non‑functional requirements
+
+- **Performance**
+  - Daily aggregates for at least one year of data should compute in under one minute in the chosen environment.  
+  - Queries joining fact tables to dimensions should support interactive exploration (typically sub‑second to a few seconds, depending on tool and hardware). [improvado](https://improvado.io/blog/ecommerce-analytics)
+
+- **Reliability & data quality**
+  - Implement checks:
+    - Row counts between raw and modeled layers within expected ranges:
+      - fact_sessions should = raw website_sessions (~472,871 rows)
+      - fact_pageviews should = raw website_pageviews (~1,188,124 rows)
+      - fact_orders should = raw orders (~32,313 rows)
+      - fact_order_items should = raw order_items (~40,025 rows)
+      - fact_refunds should = raw order_item_refunds (~1,731 rows)
+    - No duplicate primary keys in fact and dimension tables
+    - Not‑null constraints on primary and foreign keys where appropriate
+    - Referential integrity checks:
+      - All orders.website_session_id must exist in website_sessions
+      - All order_items.order_id must exist in orders
+      - All order_item_refunds.order_item_id must exist in order_items
+      - All pageviews.website_session_id must exist in website_sessions
+      - All orders.primary_product_id must exist in products
+    - Data consistency checks:
+      - orders.items_purchased should = COUNT(order_items) per order
+      - Sum of order_items.price_usd per order should = orders.price_usd (within rounding tolerance)
+      - Refund amounts should not exceed original order item prices
+      - Session timestamps should be <= pageview timestamps for that session
+      - Order timestamps should align with session timestamps
+    - Business logic validations:
+      - price_usd and cogs_usd should be > 0
+      - items_purchased should be >= 1
+      - is_primary_item count per order should = 1 (exactly one primary item)
+      - refund_amount_usd should be > 0
+      - Timestamps should be within dataset range (2012-03-19 to 2015-03-19)
+    - NULL value analysis:
+      - Document expected NULL patterns (utm_source, utm_campaign for direct traffic)
+      - Flag unexpected NULLs in required fields
+  - Simple anomaly checks on key metrics:
+    - Sessions and orders should not drop to zero during active periods
+    - Conversion rate should remain within reasonable bounds (e.g., 2-15%)
+    - Average order value should remain stable (flag if changes > 50% week-over-week)
+    - Refund rate should stay < 10% under normal circumstances
+
+- **Reproducibility**
+  - All transformations defined as code (SQL scripts, dbt models, or DAG tasks) under version control. [towardsdatascience](https://towardsdatascience.com/data-engineering-create-your-own-dataset-9c4d267eb838/)
+  - Ability to run a full refresh from raw data.
+
+- **Security**
+  - No real PII in the dataset; apply basic best practices (restricted credentials, read‑only BI access, no sharing of connection secrets in code). [sarasanalytics](https://www.sarasanalytics.com/blog/ecommerce-data-management)
+
+***
+
+## 5. Technical design expectations (for your project)
+
+This section describes what you, as the data engineer, will build.
+
+- **Storage / Warehouse**
+  - Choose a warehouse (for example, PostgreSQL, Snowflake, BigQuery, DuckDB) and document schema layout (for example, `raw`, `staging`, `mart`). [github](https://github.com/TheCaptainFalcon/toy-sales-analytics)
+
+- **Orchestration**
+  - Use an orchestration tool (Airflow, Prefect, or a simple cron‑driven script) to:
+    - Load raw data.  
+    - Run transformation jobs in the correct order (raw → staging → marts). [github](https://github.com/OBA0700/Maven_Fuzzy_Factory_Project)
+
+- **Transformation framework**
+  - Option 1: Pure SQL scripts with a documented dependency order.  
+  - Option 2: dbt‑style project with models for staging, dimensions, and facts, plus tests. [towardsdatascience](https://towardsdatascience.com/data-engineering-create-your-own-dataset-9c4d267eb838/)
+
+- **Semantic / BI layer**
+  - Build at least one dashboard (Power BI, Tableau, Looker Studio, etc.) with:
+    - Time‑series charts for sessions and orders.  
+    - Conversion rate over time.  
+    - Channel performance table.  
+    - Revenue per order and revenue per session charts. [supermetrics](https://supermetrics.com/blog/ecommerce-analytics)
+
+***
+
+## 6. Acceptance criteria
+
+The project is considered complete when: [status.mavenanalytics](https://status.mavenanalytics.io/data-playground/toy-store-e-commerce-database)
+
+1. All raw tables from the Toy Store E‑Commerce dataset are ingested and accessible in the warehouse.  
+2. Core dimensional and fact tables are built with documented schema and relationships.  
+3. Curated views/tables exist to directly answer:
+   - Session and order trends.  
+   - Conversion rate trends.  
+   - Best‑performing marketing channels.  
+   - Revenue per order and revenue per session trends.  
+4. Data quality checks run and pass on each pipeline execution, with failures clearly surfaced.  
+5. At least one dashboard or notebook presents the metrics in a business‑friendly way, with filters for date range, channel, device, and product.
+
+***
+
+## 7. Implementation notes and recommendations
+
+### 7.1 Schema design recommendations
+
+**Layer structure:**
+- **raw layer:** Exact copy of CSV files with load metadata
+  - Schema: `raw_website_sessions`, `raw_orders`, `raw_order_items`, `raw_order_item_refunds`, `raw_products`, `raw_pageviews`
+  - Add load audit columns: `_load_timestamp`, `_source_file`, `_row_number`
+
+- **staging layer:** Cleaned and typed data with initial transformations
+  - Schema: `stg_sessions`, `stg_orders`, `stg_order_items`, `stg_refunds`, `stg_products`, `stg_pageviews`
+  - Apply data type conversions, timestamp parsing, NULL handling
+  - Add derived flags and basic categorizations
+
+- **mart layer (dimensional model):** Business-ready dimensional model
+  - Dimensions: `dim_date`, `dim_channel`, `dim_device`, `dim_product`, `dim_page`
+  - Facts: `fact_sessions`, `fact_pageviews`, `fact_orders`, `fact_order_items`, `fact_refunds`
+
+- **aggregate layer:** Pre-computed aggregates for dashboards
+  - `agg_daily_traffic`, `agg_channel_performance`, `agg_product_performance`, `agg_funnel_metrics`
+
+### 7.2 Key technical challenges and solutions
+
+1. **Challenge: Landing page derivation**
+   - **Problem:** No landing_page field in website_sessions
+   - **Solution:** JOIN sessions to pageviews, get MIN(created_at) per session_id, extract pageview_url
+
+2. **Challenge: Page type classification**
+   - **Problem:** No page_type in pageviews table
+   - **Solution:** Use CASE statement to categorize based on pageview_url patterns:
+     ```sql
+     CASE
+       WHEN pageview_url = '/home' THEN 'home'
+       WHEN pageview_url LIKE '/lander-%' THEN 'lander'
+       WHEN pageview_url IN ('/the-original-mr-fuzzy', '/the-forever-love-bear',
+                             '/the-birthday-sugar-panda', '/the-hudson-river-mini-bear') THEN 'product_detail'
+       WHEN pageview_url = '/products' THEN 'products_list'
+       WHEN pageview_url = '/cart' THEN 'cart'
+       WHEN pageview_url IN ('/billing', '/billing-2') THEN 'billing'
+       WHEN pageview_url = '/shipping' THEN 'shipping'
+       WHEN pageview_url = '/thank-you-for-your-order' THEN 'thank_you'
+       ELSE 'other'
+     END
+     ```
+
+3. **Challenge: Order-level refund aggregation**
+   - **Problem:** Refunds are at order_item level, need order-level totals
+   - **Solution:** LEFT JOIN orders to aggregated refunds:
+     ```sql
+     SELECT order_id, SUM(refund_amount_usd) as total_refund_amount_usd
+     FROM order_item_refunds
+     GROUP BY order_id
+     ```
+
+4. **Challenge: Session funnel flags**
+   - **Problem:** Need to identify which funnel steps each session reached
+   - **Solution:** Use window functions or subqueries with EXISTS/IN clauses
+
+5. **Challenge: Product categories**
+   - **Problem:** No category field in products table
+   - **Solution:** Hardcode mapping based on 4 known products, or use string matching
+
+6. **Challenge: Direct/organic traffic**
+   - **Problem:** NULL utm values need meaningful labels
+   - **Solution:** Use COALESCE or CASE to map NULLs to 'direct' or 'organic'
+
+### 7.3 Performance optimization recommendations
+
+- **Indexing strategy:**
+  - Primary keys on all ID columns
+  - Foreign keys for joins (session_id, order_id, user_id, product_id)
+  - Date columns for time-based filtering
+  - Composite indexes on (date, channel_key, device_key) for common aggregations
+
+- **Partitioning:**
+  - Partition large fact tables by date (monthly or quarterly)
+  - Particularly important for fact_pageviews (~1.2M rows)
+
+- **Materialized views/aggregate tables:**
+  - Pre-compute daily/weekly/monthly aggregates
+  - Create funnel step summaries
+  - Cache channel performance metrics
+
+### 7.4 Data volume considerations
+
+- **Largest tables:** website_pageviews (~1.2M rows), website_sessions (~473K rows)
+- **Join complexity:** Most analytics require multi-table joins (sessions → pageviews → orders)
+- **Recommendation:** For 3 years of data, most modern SQL databases (PostgreSQL, MySQL, DuckDB) will handle this comfortably without special optimization
+- **Scalability:** If extending to 10+ years or adding more products/traffic, consider:
+  - Columnar storage (Parquet files)
+  - Cloud warehouses (Snowflake, BigQuery, Redshift)
+  - Incremental processing instead of full refresh
+
+### 7.5 Testing and validation checklist
+
+Before considering the pipeline complete, validate:
+
+- [ ] Row counts match between raw and final layers
+- [ ] All foreign key relationships are valid (no orphan records)
+- [ ] Conversion rate is ~6-7% (matches expected pattern)
+- [ ] Date range spans March 2012 to March 2015
+- [ ] Four products exist in dim_product
+- [ ] Refund rate is ~5-6%
+- [ ] Average order value is reasonable (~$50 based on sample data)
+- [ ] UTM sources include: gsearch, bsearch, socialbook, NULL
+- [ ] Landing pages include: /home, /lander-1 through /lander-5
+- [ ] All orders have corresponding sessions
+- [ ] Exactly one primary item per order (is_primary_item = 1 count)
+- [ ] Sum of order_items prices matches order total (within rounding)
+- [ ] Dashboard queries run in < 5 seconds
+- [ ] Full pipeline refresh completes in < 5 minutes
+
+### 7.6 Recommended technology stack options
+
+**Option 1: PostgreSQL + dbt + Metabase (lightweight, local)**
+- Database: PostgreSQL for warehouse
+- Transformation: dbt Core for modeling
+- Orchestration: dbt Cloud or cron
+- Visualization: Metabase or Apache Superset
+- Best for: Learning, portfolio projects, small deployments
+
+**Option 2: DuckDB + Python + Streamlit (modern, fast)**
+- Database: DuckDB (in-process analytical database)
+- Transformation: Python pandas or DuckDB SQL
+- Orchestration: Python scripts with scheduling
+- Visualization: Streamlit or Plotly Dash
+- Best for: Fast prototyping, analytical workloads, portfolio projects
+
+**Option 3: Cloud data warehouse (production-scale)**
+- Database: Snowflake, BigQuery, or Redshift
+- Transformation: dbt Cloud
+- Orchestration: Airflow or Prefect
+- Visualization: Tableau, Looker, or Power BI
+- Best for: Production deployments, team collaboration
+
+**Option 4: Modern data stack (recommended for portfolio)**
+- Storage: Local PostgreSQL or DuckDB
+- Ingestion: Python scripts or dbt seeds
+- Transformation: dbt with tests and documentation
+- Orchestration: Airflow or Dagster
+- Visualization: Preset (hosted Superset) or Metabase
+- Version control: Git + GitHub
+- Best for: Demonstrating end-to-end data engineering skills
+
+***
+
+## 8. Expected deliverables
+
+At project completion, you should have:
+
+1. **Code repository** with:
+   - SQL DDL scripts for all schemas (raw, staging, mart)
+   - Transformation logic (SQL scripts or dbt models)
+   - Data quality tests
+   - Orchestration code (DAGs or scripts)
+   - README with setup instructions
+   - Documentation of design decisions
+
+2. **Database/warehouse** containing:
+   - All raw tables loaded from CSVs
+   - Dimensional model (dims and facts)
+   - Aggregate tables or views
+   - Data quality test results
+
+3. **Dashboard(s)** showing:
+   - Traffic and order trends over time (line charts)
+   - Conversion rate trends
+   - Channel performance comparison (table or bar chart)
+   - Device performance
+   - Revenue per order and revenue per session trends
+   - Landing page A/B test results
+   - Funnel visualization
+   - Product performance breakdown
+
+4. **Documentation** including:
+   - ERD (entity relationship diagram) of final dimensional model
+   - Data dictionary for all tables and columns
+   - Transformation logic documentation
+   - Data quality test results
+   - Known issues and limitations
+   - Instructions for running the pipeline
+
+5. **Optional enhancements:**
+   - Automated data quality alerts
+   - Incremental refresh capability
+   - User cohort analysis
+   - Predictive analytics (churn prediction, LTV forecasting)
+   - Real-time dashboard refresh
+   - CI/CD pipeline for transformations
+
+This comprehensive PRD should now serve as your complete guide for building the Maven Fuzzy Factory data engineering project.
